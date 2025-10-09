@@ -1,173 +1,307 @@
-# 牙齿分割项目
+# 牙齿分割深度学习项目
 
-这是一个基于深度学习的牙齿分割项目，使用U-Net架构进行医学图像分割。
+## 项目概述
+
+本项目实现了一个基于深度学习的牙齿分割算法，能够根据输入的RGB牙齿图像和特定的牙齿ID，输出该牙齿的像素级分割mask。
+
+## 项目特点
+
+- **条件化分割**: 使用FiLM (Feature-wise Linear Modulation) 机制将牙齿ID信息注入到U-Net模型中
+- **多损失函数**: 结合BCE损失、Dice损失和Focal损失
+- **完整评估**: 实现像素准确率、IoU、Dice系数等多种评估指标
+- **可视化工具**: 提供丰富的可视化和分析工具
+- **模块化设计**: 代码结构清晰，易于扩展和维护
 
 ## 项目结构
 
 ```
-assignment1/
-├── data/                          # 数据目录
-│   └── ToothSegmDataset/         # 牙齿分割数据集
-├── models/                        # 模型定义
-│   ├── unet.py                   # U-Net模型
-│   ├── loss.py                   # 损失函数
-│   ├── optimizer.py              # 优化器
-│   └── test_model.py             # 模型测试
-├── utils/                         # 工具函数
-│   ├── metrics.py                # 评估指标
-│   └── visualization.py          # 可视化工具
-├── results/                       # 结果输出
-├── data_loader.py                # 数据加载器
-├── train.py                      # 训练脚本
-├── test_data_loader.py           # 数据加载器测试
-├── config.py                     # 配置文件
-└── requirements.txt              # 依赖包
+homework/
+├── config.py                 # 配置文件
+├── requirements.txt          # 依赖包列表
+├── train.py                 # 训练脚本
+├── test.py                  # 测试脚本
+├── models/                  # 模型定义
+│   ├── __init__.py
+│   ├── unet.py             # U-Net模型with tooth ID conditioning
+│   └── loss.py             # 损失函数
+├── utils/                   # 工具函数
+│   ├── __init__.py
+│   ├── dataset.py          # 数据加载器
+│   ├── metrics.py          # 评估指标
+│   └── visualization.py    # 可视化工具
+├── data/                    # 数据目录
+│   └── ToothSegmDataset/
+│       ├── trainset_valset/ # 训练和验证数据
+│       └── testset/        # 测试数据
+└── outputs/                 # 输出目录
+    ├── models/             # 保存的模型
+    ├── logs/               # 训练日志
+    ├── results/            # 测试结果
+    └── visualizations/     # 可视化结果
 ```
 
-## 数据集
+## 环境配置
 
-数据集包含以下结构：
-- `testset/`: 测试集，包含RGB图像
-- `trainset_valset/`: 训练和验证集，包含RGB图像和对应的掩码
-
-每个牙齿类型都有独立的文件夹，包含多个患者的图像。
-
-## 特性
-
-### 健壮的数据加载
-- 自动处理损坏的图像文件
-- 支持多种图像格式
-- 数据增强和预处理
-- 跳过无法加载的样本
-
-### 模型架构
-- U-Net分割网络
-- 支持多类别分割
-- 可配置的网络深度和宽度
-
-### 训练功能
-- 自动混合精度训练
-- 学习率调度
-- 早停机制
-- 模型检查点保存
-- TensorBoard日志记录
-
-### 评估指标
-- Dice分数
-- IoU分数
-- 像素准确率
-- 精确率、召回率、F1分数
-
-## 安装依赖
+### 安装依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 使用方法
+### 主要依赖
 
-### 1. 测试数据加载器
+- PyTorch >= 1.9.0
+- torchvision >= 0.10.0
+- OpenCV >= 4.5.0
+- matplotlib >= 3.4.0
+- albumentations >= 1.1.0
+- scikit-learn >= 1.0.0
 
-```bash
-python test_data_loader.py
-```
+## 数据格式
 
-### 2. 训练模型
+### 数据集结构
 
-```bash
-python train.py
-```
+- **训练数据**: `trainset_valset/` - 按牙齿ID组织，每个ID包含多个患者的RGB图像和对应的mask图像
+- **测试数据**: `testset/` - 只包含RGB图像，用于最终测试
 
-### 3. 配置参数
-
-修改 `config.py` 文件来调整训练参数：
+### 牙齿ID映射
 
 ```python
-MODEL_CONFIG = {
-    'num_classes': 2,
-    'image_size': 512,
-    'batch_size': 8,
-    'epochs': 100,
-    'learning_rate': 1e-4,
-    # ... 其他参数
+TOOTH_ID_MAPPING = {
+    "11": 0, "12": 1, "13": 2, "14": 3, "15": 4, "16": 5, "17": 6,
+    "21": 8, "22": 9, "23": 10, "24": 11, "25": 12, "26": 13, "27": 14,
+    "34": 19, "35": 20, "36": 21, "37": 22,
+    "45": 28, "46": 29, "47": 30
 }
 ```
 
-## 数据加载器特性
+### Mask编码
 
-### 处理损坏图像
-数据加载器能够自动处理以下问题：
-- 损坏的JPEG文件
-- 无法识别的图像格式
-- 缺失的掩码文件
-- 加载失败的图像
+- Value 1: 上牙龈
+- Value 2: 下牙龈  
+- Value 3: 目标牙齿
+
+## 使用方法
+
+### 1. 训练模型
+
+```bash
+# 使用默认配置训练
+python train.py
+
+# 自定义参数训练
+python train.py --batch_size 16 --epochs 50 --lr 0.001 --tooth_ids 0 1 2 3
+
+# 恢复训练
+python train.py --resume outputs/models/best_model.pth
+```
+
+### 2. 测试模型
+
+```bash
+# 测试所有选择的牙齿ID
+python test.py --model_path outputs/models/best_model.pth
+
+# 测试特定牙齿ID
+python test.py --model_path outputs/models/best_model.pth --tooth_ids 0 1 2 3 --num_samples 5
+```
+
+### 3. 推理接口
+
+```python
+from test import inference
+import cv2
+import numpy as np
+
+# 加载图像
+image = cv2.imread('path/to/image.jpg')
+image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+# 推理
+mask = inference(
+    input_image=image,
+    tooth_id=0,  # 目标牙齿ID
+    model_path='outputs/models/best_model.pth'
+)
+
+# 显示结果
+from utils.visualization import show_anns
+show_anns(image, mask, title="分割结果")
+```
+
+## 模型架构
+
+### U-Net with Tooth ID Conditioning
+
+模型采用U-Net架构，通过以下方式实现牙齿ID条件化：
+
+1. **牙齿ID嵌入**: 将牙齿ID转换为高维嵌入向量
+2. **FiLM调制**: 使用Feature-wise Linear Modulation将牙齿ID信息注入到特征中
+3. **多尺度条件化**: 在编码器的多个层级应用条件化
+
+### 关键组件
+
+- **编码器**: 4层下采样，提取多尺度特征
+- **瓶颈层**: 最深层特征提取
+- **解码器**: 4层上采样，恢复空间分辨率
+- **FiLM层**: 在每层应用条件化调制
+- **跳跃连接**: 保留细节信息
+
+## 损失函数
+
+### 组合损失
+
+```python
+Loss = BCE_weight * BCE_Loss + Dice_weight * Dice_Loss + Focal_weight * Focal_Loss
+```
+
+- **BCE损失**: 二元交叉熵损失
+- **Dice损失**: 处理类别不平衡
+- **Focal损失**: 关注难分类样本
+
+## 评估指标
+
+- **像素准确率 (Pixel Accuracy)**: 正确分类的像素比例
+- **平均像素准确率 (mPA)**: 各类别像素准确率的平均值
+- **IoU**: 交集与并集的比值
+- **平均IoU (mIoU)**: 各类别IoU的平均值
+- **Dice系数**: 2 * 交集 / (预测 + 真实)
+
+## 训练策略
 
 ### 数据增强
-- 随机水平/垂直翻转
-- 随机旋转
+
+- 水平/垂直翻转
+- 旋转 (±15度)
 - 亮度/对比度调整
-- 噪声添加（可选）
+- 随机缩放
+
+### 优化策略
+
+- **优化器**: AdamW
+- **学习率调度**: ReduceLROnPlateau
+- **早停**: 验证损失不再下降时停止
+- **权重衰减**: L2正则化
+
+### 超参数
+
+```python
+TRAIN_CONFIG = {
+    "batch_size": 8,
+    "num_epochs": 100,
+    "learning_rate": 1e-4,
+    "weight_decay": 1e-5,
+    "patience": 15,
+    "val_split": 0.1,
+    "image_size": (256, 256)
+}
+```
+
+## 可视化功能
+
+### 训练过程可视化
+
+- 训练/验证损失曲线
+- 学习率调度曲线
+- 指标变化趋势
+
+### 结果可视化
+
+- 原始图像、真实mask、预测mask对比
+- 叠加显示
+- 差异分析
+- 不同牙齿ID性能对比
+
+### 调试工具
+
+- 注意力可视化
+- 损失景观分析
+- 数据样本展示
+
+## 实验记录
+
+### 训练监控
+
+使用TensorBoard记录训练过程：
+
+```bash
+tensorboard --logdir outputs/logs
+```
+
+### 结果保存
+
+- **模型检查点**: `outputs/models/`
+- **训练日志**: `outputs/logs/`
+- **测试结果**: `outputs/results/`
+- **可视化图像**: `outputs/visualizations/`
+
+## 性能优化
 
 ### 内存优化
-- 按需加载图像
-- 支持多进程数据加载
-- 自动跳过损坏文件
 
-## 模型训练
+- 使用混合精度训练
+- 梯度累积
+- 数据加载优化
 
-### 损失函数
-- Dice损失：处理类别不平衡
-- 交叉熵损失：辅助训练
-- 组合损失：Dice + 0.5 * CrossEntropy
+### 计算优化
 
-### 优化器
-- Adam优化器
-- 学习率调度
-- 权重衰减
-
-### 监控
-- 实时训练进度
-- TensorBoard可视化
-- 自动保存最佳模型
-
-## 结果输出
-
-训练完成后，结果将保存在 `results/` 目录：
-- `checkpoints/`: 模型检查点
-- `logs/`: TensorBoard日志
-- `visualizations/`: 可视化结果
-- `predictions/`: 预测结果
+- GPU加速
+- 批处理推理
+- 模型量化
 
 ## 故障排除
 
 ### 常见问题
 
-1. **图像加载失败**
-   - 数据加载器会自动跳过损坏的图像
-   - 检查数据集路径是否正确
+1. **CUDA内存不足**: 减小batch_size
+2. **数据加载错误**: 检查数据路径和格式
+3. **模型收敛慢**: 调整学习率或损失函数权重
 
-2. **内存不足**
-   - 减小批次大小
-   - 减小图像尺寸
-   - 减少工作进程数
+### 调试建议
 
-3. **训练速度慢**
-   - 使用GPU训练
-   - 增加批次大小
-   - 使用混合精度训练
+1. 使用小数据集测试
+2. 检查数据预处理
+3. 监控梯度范数
+4. 可视化中间结果
 
-### 调试模式
+## 扩展功能
 
-设置环境变量启用详细日志：
-```bash
-export PYTHONPATH=$PWD
-python train.py
-```
+### 模型改进
 
-## 贡献
+- 添加注意力机制
+- 使用更深的网络
+- 多尺度训练
 
-欢迎提交问题和改进建议！
+### 数据增强
+
+- 弹性变形
+- 颜色空间变换
+- 混合增强
+
+### 后处理
+
+- 形态学操作
+- 连通域分析
+- 轮廓优化
+
+## 贡献指南
+
+1. Fork项目
+2. 创建功能分支
+3. 提交更改
+4. 创建Pull Request
 
 ## 许可证
 
-本项目仅供学习和研究使用。
+本项目采用MIT许可证。
+
+## 联系方式
+
+如有问题或建议，请通过以下方式联系：
+
+- 邮箱: [your-email@example.com]
+- GitHub: [your-github-username]
+
+## 致谢
+
+感谢所有为这个项目做出贡献的开发者和研究人员。

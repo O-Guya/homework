@@ -1,87 +1,66 @@
 """
-配置文件
+配置文件 - 牙齿分割项目
 """
 import os
-from pathlib import Path
 
-# 项目根目录
-PROJECT_ROOT = Path(__file__).parent
+# 数据路径配置
+DATA_ROOT = "/Users/oguya/Documents/Courses/6004-image/homework/data/ToothSegmDataset"
+TRAIN_DATA_PATH = os.path.join(DATA_ROOT, "trainset_valset")
+TEST_DATA_PATH = os.path.join(DATA_ROOT, "testset")
 
-# 数据路径
-DATA_DIR = PROJECT_ROOT / "data" / "ToothSegmDataset"
-OUTPUT_DIR = PROJECT_ROOT / "results"
+# 牙齿ID映射 (根据prompt中的要求)
+TOOTH_ID_MAPPING = {
+    "11": 0, "12": 1, "13": 2, "14": 3, "15": 4, "16": 5, "17": 6,
+    "21": 8, "22": 9, "23": 10, "24": 11, "25": 12, "26": 13, "27": 14,
+    "34": 19, "35": 20, "36": 21, "37": 22,
+    "45": 28, "46": 29, "47": 30
+}
+
+# 反向映射
+ID_TO_TOOTH_MAPPING = {v: k for k, v in TOOTH_ID_MAPPING.items()}
 
 # 模型配置
 MODEL_CONFIG = {
-    'num_classes': 2,  # 背景 + 牙齿
-    'image_size': 512,
-    'batch_size': 8,
-    'num_workers': 4,
-    'epochs': 100,
-    'learning_rate': 1e-4,
-    'weight_decay': 1e-5,
-    'patience': 10,
-    'early_stopping_patience': 20,
-    'tooth_types': None,  # 使用所有牙齿类型
+    "input_channels": 3,  # RGB图像
+    "num_classes": 1,     # 二分类分割任务
+    "base_filters": 64,   # 基础滤波器数量
+    "dropout_rate": 0.1,  # Dropout率
+    "num_tooth_ids": 21,  # 牙齿ID数量
+    "tooth_id_embedding_dim": 32,  # 牙齿ID嵌入维度
+}
+
+# 训练配置
+TRAIN_CONFIG = {
+    "batch_size": 8,
+    "num_epochs": 100,
+    "learning_rate": 1e-4,
+    "weight_decay": 1e-5,
+    "patience": 15,  # 早停耐心值
+    "val_split": 0.1,  # 验证集比例 (10 samples per tooth ID)
+    "image_size": (256, 256),  # 输入图像尺寸
+    "selected_tooth_ids": [0, 1, 2, 3],  # 选择至少4个牙齿ID进行训练
 }
 
 # 数据增强配置
 AUGMENTATION_CONFIG = {
-    'horizontal_flip': True,
-    'vertical_flip': True,
-    'rotation': True,
-    'brightness_contrast': True,
-    'noise': False,
-    'blur': False,
+    "horizontal_flip": True,
+    "vertical_flip": True,
+    "rotation_range": 15,
+    "brightness_range": 0.2,
+    "contrast_range": 0.2,
+    "scale_range": (0.8, 1.2),
 }
 
-# 训练配置
-TRAINING_CONFIG = {
-    'use_mixed_precision': True,
-    'gradient_clip_norm': 1.0,
-    'save_every_n_epochs': 10,
-    'validate_every_n_epochs': 1,
-    'log_every_n_steps': 50,
-}
-
-# 设备配置
-DEVICE_CONFIG = {
-    'device': 'cuda' if os.environ.get('CUDA_VISIBLE_DEVICES') else 'cpu',
-    'mixed_precision': True,
-}
-
-# 输出配置
-OUTPUT_CONFIG = {
-    'save_predictions': True,
-    'save_visualizations': True,
-    'save_model_architecture': True,
-    'tensorboard_logging': True,
-}
-
-# 验证配置
-VALIDATION_CONFIG = {
-    'metrics': ['dice', 'iou', 'pixel_accuracy', 'precision', 'recall', 'f1'],
-    'save_best_model': True,
-    'save_last_model': True,
-}
-
-# 测试配置
-TEST_CONFIG = {
-    'batch_size': 16,
-    'save_predictions': True,
-    'num_visualization_samples': 10,
-}
-
-# 日志配置
-LOGGING_CONFIG = {
-    'level': 'INFO',
-    'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    'file': OUTPUT_DIR / 'training.log',
-}
+# 输出路径配置
+OUTPUT_DIR = "/Users/oguya/Documents/Courses/6004-image/homework/outputs"
+MODEL_SAVE_PATH = os.path.join(OUTPUT_DIR, "models")
+LOG_SAVE_PATH = os.path.join(OUTPUT_DIR, "logs")
+RESULT_SAVE_PATH = os.path.join(OUTPUT_DIR, "results")
+VISUALIZATION_SAVE_PATH = os.path.join(OUTPUT_DIR, "visualizations")
 
 # 创建输出目录
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-(OUTPUT_DIR / 'logs').mkdir(exist_ok=True)
-(OUTPUT_DIR / 'checkpoints').mkdir(exist_ok=True)
-(OUTPUT_DIR / 'visualizations').mkdir(exist_ok=True)
-(OUTPUT_DIR / 'predictions').mkdir(exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(MODEL_SAVE_PATH, exist_ok=True)
+os.makedirs(LOG_SAVE_PATH, exist_ok=True)
+os.makedirs(RESULT_SAVE_PATH, exist_ok=True)
+os.makedirs(VISUALIZATION_SAVE_PATH, exist_ok=True)

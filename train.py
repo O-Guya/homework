@@ -1,55 +1,76 @@
 """
-牙齿分割训练脚本
+训练脚本 - 牙齿分割模型
 """
+import os
+import time
+import argparse
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
-import os
-import time
-import json
-from pathlib import Path
-import logging
 from tqdm import tqdm
-import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-from models.unet import UNet
-from data_loader import create_dataloaders
-from utils.metrics import DiceLoss, IoUScore, DiceScore
-from utils.visualization import save_predictions
-
-# 设置日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from config import *
+from models.unet import create_model
+from models.loss import create_loss_function
+from utils.dataset import create_data_loaders
+from utils.metrics import MetricsTracker
 
 
-class ToothSegmentationTrainer:
-    """牙齿分割训练器"""
-    
-    def __init__(self, config):
+class EarlyStopping:
+    """早停机制"""
+    def __init__(self, patience=7, min_delta=0, restore_best_weights=True):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.restore_best_weights = restore_best_weights
+        self.best_loss = None
+        self.counter = 0
+        self.best_weights = None
+
+    def __call__(self, val_loss, model):
+        if self.best_loss is None:
+            self.best_loss = val_loss
+            self.save_checkpoint(model)
+        elif val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+            self.save_checkpoint(model)
+        else:
+            self.counter += 1
+
+        if self.counter >= self.patience:
+            if self.restore_best_weights:
+                model.load_state_dict(self.best_weights)
+            return True
+        return False
+
+    def save_checkpoint(self, model):
+        self.best_weights = model.state_dict().copy()
+
+
+class Trainer:
+    """训练器类"""
+    def __init__(self, model, train_loader, val_loader, device, config):
+        self.model = model
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.device = device
         self.config = config
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        logger.info(f"使用设备: {self.device}")
         
-        # 创建输出目录
-        self.output_dir = Path(config['output_dir'])
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        # 损失函数
+        self.criterion = create_loss_function(
+            loss_type='combined',
+            bce_weight=1.0,
+            dice_weight=1.0,
+            focal_weight=0.5
+        )
         
-        # 保存配置
-        with open(self.output_dir / 'config.json', 'w') as f:
-            json.dump(config, f, indent=2)
-        
-        # 初始化模型
-        self.model = UNet(num_classes=config['num_classes']).to(self.device)
-        logger.info(f"模型参数数量: {sum(p.numel() for p in self.model.parameters()):,}")
-        
-        # 初始化损失函数
-        self.criterion = DiceLoss()
-        self.aux_criterion = nn.CrossEntropyLoss()
-        
-        # 初始化优化器
-        self.optimizer = optim.Adam(
-            self.model.parameters(),
+        # 优化器
+        self.optimizer = optim.AdamW(
+            model.parameters(),
             lr=config['learning_rate'],
             weight_decay=config['weight_decay']
         )
@@ -57,276 +78,305 @@ class ToothSegmentationTrainer:
         # 学习率调度器
         self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
-            mode='max',
+            mode='min',
             factor=0.5,
-            patience=config['patience']
+            patience=5,
+            verbose=True
         )
         
-        # 初始化数据加载器
-        self.train_loader, self.val_loader, self.test_loader = create_dataloaders(
-            data_dir=config['data_dir'],
-            batch_size=config['batch_size'],
-            num_workers=config['num_workers'],
-            image_size=config['image_size'],
-            tooth_types=config.get('tooth_types', None),
-            train_augment=True
+        # 早停
+        self.early_stopping = EarlyStopping(
+            patience=config['patience'],
+            min_delta=1e-4
         )
         
-        # 初始化指标
-        self.metrics = {
-            'train_loss': [],
-            'val_loss': [],
-            'val_dice': [],
-            'val_iou': []
-        }
+        # 指标跟踪器
+        self.train_metrics = MetricsTracker()
+        self.val_metrics = MetricsTracker()
         
-        # 初始化TensorBoard
-        self.writer = SummaryWriter(self.output_dir / 'logs')
+        # TensorBoard
+        self.writer = SummaryWriter(LOG_SAVE_PATH)
         
-        # 最佳模型跟踪
-        self.best_dice = 0.0
-        self.epochs_without_improvement = 0
-        
+        # 训练历史
+        self.train_losses = []
+        self.val_losses = []
+        self.learning_rates = []
+
     def train_epoch(self, epoch):
         """训练一个epoch"""
         self.model.train()
+        self.train_metrics.reset()
+        
         total_loss = 0.0
-        num_batches = len(self.train_loader)
+        progress_bar = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{self.config["num_epochs"]}')
         
-        pbar = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{self.config["epochs"]}')
-        
-        for batch_idx, batch in enumerate(pbar):
+        for batch_idx, batch in enumerate(progress_bar):
+            # 获取数据
             images = batch['image'].to(self.device)
             masks = batch['mask'].to(self.device)
+            tooth_ids = batch['tooth_id'].to(self.device)
             
             # 前向传播
             self.optimizer.zero_grad()
-            outputs = self.model(images)
+            outputs = self.model(images, tooth_ids)
             
             # 计算损失
-            dice_loss = self.criterion(outputs, masks)
-            ce_loss = self.aux_criterion(outputs, masks)
-            total_loss_batch = dice_loss + 0.5 * ce_loss
+            loss = self.criterion(outputs, masks)
             
             # 反向传播
-            total_loss_batch.backward()
+            loss.backward()
             self.optimizer.step()
             
-            total_loss += total_loss_batch.item()
+            # 更新指标
+            with torch.no_grad():
+                pred_sigmoid = torch.sigmoid(outputs)
+                self.train_metrics.update(pred_sigmoid, masks)
+            
+            total_loss += loss.item()
             
             # 更新进度条
-            pbar.set_postfix({
-                'Loss': f'{total_loss_batch.item():.4f}',
-                'Avg Loss': f'{total_loss / (batch_idx + 1):.4f}'
+            progress_bar.set_postfix({
+                'Loss': f'{loss.item():.4f}',
+                'Avg Loss': f'{total_loss/(batch_idx+1):.4f}'
             })
+            
+            # 记录到TensorBoard
+            global_step = epoch * len(self.train_loader) + batch_idx
+            self.writer.add_scalar('Train/Loss', loss.item(), global_step)
         
-        avg_loss = total_loss / num_batches
-        self.metrics['train_loss'].append(avg_loss)
+        avg_loss = total_loss / len(self.train_loader)
+        avg_metrics = self.train_metrics.get_average_metrics()
         
-        return avg_loss
-    
+        return avg_loss, avg_metrics
+
     def validate_epoch(self, epoch):
         """验证一个epoch"""
         self.model.eval()
-        total_loss = 0.0
-        total_dice = 0.0
-        total_iou = 0.0
-        num_batches = len(self.val_loader)
+        self.val_metrics.reset()
         
-        dice_metric = DiceScore()
-        iou_metric = IoUScore()
+        total_loss = 0.0
         
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc='Validation'):
+                # 获取数据
                 images = batch['image'].to(self.device)
                 masks = batch['mask'].to(self.device)
+                tooth_ids = batch['tooth_id'].to(self.device)
                 
                 # 前向传播
-                outputs = self.model(images)
+                outputs = self.model(images, tooth_ids)
                 
                 # 计算损失
-                dice_loss = self.criterion(outputs, masks)
-                ce_loss = self.aux_criterion(outputs, masks)
-                total_loss_batch = dice_loss + 0.5 * ce_loss
+                loss = self.criterion(outputs, masks)
+                total_loss += loss.item()
                 
-                total_loss += total_loss_batch.item()
-                
-                # 计算指标
-                predictions = torch.argmax(outputs, dim=1)
-                dice_score = dice_metric(predictions, masks)
-                iou_score = iou_metric(predictions, masks)
-                
-                total_dice += dice_score
-                total_iou += iou_score
+                # 更新指标
+                pred_sigmoid = torch.sigmoid(outputs)
+                self.val_metrics.update(pred_sigmoid, masks)
         
-        avg_loss = total_loss / num_batches
-        avg_dice = total_dice / num_batches
-        avg_iou = total_iou / num_batches
+        avg_loss = total_loss / len(self.val_loader)
+        avg_metrics = self.val_metrics.get_average_metrics()
         
-        self.metrics['val_loss'].append(avg_loss)
-        self.metrics['val_dice'].append(avg_dice)
-        self.metrics['val_iou'].append(avg_iou)
-        
-        return avg_loss, avg_dice, avg_iou
-    
-    def save_checkpoint(self, epoch, is_best=False):
-        """保存检查点"""
-        checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
-            'best_dice': self.best_dice,
-            'metrics': self.metrics
-        }
-        
-        # 保存最新检查点
-        torch.save(checkpoint, self.output_dir / 'checkpoint_latest.pth')
-        
-        # 保存最佳模型
-        if is_best:
-            torch.save(checkpoint, self.output_dir / 'checkpoint_best.pth')
-            logger.info(f"保存最佳模型 (Dice: {self.best_dice:.4f})")
-    
+        return avg_loss, avg_metrics
+
     def train(self):
-        """主训练循环"""
-        logger.info("开始训练...")
+        """完整训练过程"""
+        print("开始训练...")
+        print(f"设备: {self.device}")
+        print(f"模型参数数量: {sum(p.numel() for p in self.model.parameters()):,}")
+        print(f"训练样本数: {len(self.train_loader.dataset)}")
+        print(f"验证样本数: {len(self.val_loader.dataset)}")
+        
+        best_val_loss = float('inf')
         start_time = time.time()
         
-        for epoch in range(self.config['epochs']):
+        for epoch in range(self.config['num_epochs']):
+            epoch_start_time = time.time()
+            
             # 训练
-            train_loss = self.train_epoch(epoch)
+            train_loss, train_metrics = self.train_epoch(epoch)
             
             # 验证
-            val_loss, val_dice, val_iou = self.validate_epoch(epoch)
+            val_loss, val_metrics = self.validate_epoch(epoch)
             
-            # 更新学习率
-            self.scheduler.step(val_dice)
+            # 学习率调度
+            self.scheduler.step(val_loss)
+            current_lr = self.optimizer.param_groups[0]['lr']
+            
+            # 记录历史
+            self.train_losses.append(train_loss)
+            self.val_losses.append(val_loss)
+            self.learning_rates.append(current_lr)
             
             # 记录到TensorBoard
-            self.writer.add_scalar('Loss/Train', train_loss, epoch)
-            self.writer.add_scalar('Loss/Val', val_loss, epoch)
-            self.writer.add_scalar('Metrics/Dice', val_dice, epoch)
-            self.writer.add_scalar('Metrics/IoU', val_iou, epoch)
-            self.writer.add_scalar('Learning_Rate', self.optimizer.param_groups[0]['lr'], epoch)
+            self.writer.add_scalar('Epoch/Train_Loss', train_loss, epoch)
+            self.writer.add_scalar('Epoch/Val_Loss', val_loss, epoch)
+            self.writer.add_scalar('Epoch/Learning_Rate', current_lr, epoch)
+            self.writer.add_scalar('Epoch/Train_Pixel_Accuracy', train_metrics['pixel_accuracy'], epoch)
+            self.writer.add_scalar('Epoch/Val_Pixel_Accuracy', val_metrics['pixel_accuracy'], epoch)
+            self.writer.add_scalar('Epoch/Train_IoU', train_metrics['iou'], epoch)
+            self.writer.add_scalar('Epoch/Val_IoU', val_metrics['iou'], epoch)
+            self.writer.add_scalar('Epoch/Train_Dice', train_metrics['dice'], epoch)
+            self.writer.add_scalar('Epoch/Val_Dice', val_metrics['dice'], epoch)
             
-            # 打印结果
-            logger.info(
-                f"Epoch {epoch+1}/{self.config['epochs']}: "
-                f"Train Loss: {train_loss:.4f}, "
-                f"Val Loss: {val_loss:.4f}, "
-                f"Val Dice: {val_dice:.4f}, "
-                f"Val IoU: {val_iou:.4f}"
-            )
+            # 打印epoch结果
+            epoch_time = time.time() - epoch_start_time
+            print(f"\nEpoch {epoch+1}/{self.config['num_epochs']} - {epoch_time:.2f}s")
+            print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            print(f"Train PA: {train_metrics['pixel_accuracy']:.4f}, Val PA: {val_metrics['pixel_accuracy']:.4f}")
+            print(f"Train IoU: {train_metrics['iou']:.4f}, Val IoU: {val_metrics['iou']:.4f}")
+            print(f"Train Dice: {train_metrics['dice']:.4f}, Val Dice: {val_metrics['dice']:.4f}")
+            print(f"Learning Rate: {current_lr:.6f}")
             
-            # 检查是否是最佳模型
-            is_best = val_dice > self.best_dice
-            if is_best:
-                self.best_dice = val_dice
-                self.epochs_without_improvement = 0
-            else:
-                self.epochs_without_improvement += 1
+            # 保存最佳模型
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'val_loss': val_loss,
+                    'val_metrics': val_metrics,
+                    'config': self.config
+                }, os.path.join(MODEL_SAVE_PATH, 'best_model.pth'))
+                print(f"保存最佳模型 (Val Loss: {val_loss:.4f})")
             
-            # 保存检查点
-            self.save_checkpoint(epoch, is_best)
-            
-            # 早停
-            if self.epochs_without_improvement >= self.config['early_stopping_patience']:
-                logger.info(f"早停触发，{self.config['early_stopping_patience']} 个epoch无改善")
+            # 早停检查
+            if self.early_stopping(val_loss, self.model):
+                print(f"早停触发，在第 {epoch+1} 轮停止训练")
                 break
         
         # 训练完成
         total_time = time.time() - start_time
-        logger.info(f"训练完成！总时间: {total_time/3600:.2f} 小时")
-        logger.info(f"最佳Dice分数: {self.best_dice:.4f}")
+        print(f"\n训练完成！总用时: {total_time/3600:.2f} 小时")
         
         # 保存最终模型
-        torch.save(self.model.state_dict(), self.output_dir / 'model_final.pth')
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': self.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'val_loss': val_loss,
+            'val_metrics': val_metrics,
+            'config': self.config,
+            'train_losses': self.train_losses,
+            'val_losses': self.val_losses,
+            'learning_rates': self.learning_rates
+        }, os.path.join(MODEL_SAVE_PATH, 'final_model.pth'))
+        
+        # 绘制训练曲线
+        self.plot_training_curves()
         
         # 关闭TensorBoard
         self.writer.close()
-    
-    def test(self):
-        """测试模型"""
-        logger.info("开始测试...")
+
+    def plot_training_curves(self):
+        """绘制训练曲线"""
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
         
-        # 加载最佳模型
-        checkpoint = torch.load(self.output_dir / 'checkpoint_best.pth')
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        # 损失曲线
+        axes[0, 0].plot(self.train_losses, label='Train Loss', color='blue')
+        axes[0, 0].plot(self.val_losses, label='Val Loss', color='red')
+        axes[0, 0].set_title('Training and Validation Loss')
+        axes[0, 0].set_xlabel('Epoch')
+        axes[0, 0].set_ylabel('Loss')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True)
         
-        self.model.eval()
-        test_dice = 0.0
-        test_iou = 0.0
-        num_batches = len(self.test_loader)
+        # 学习率曲线
+        axes[0, 1].plot(self.learning_rates, label='Learning Rate', color='green')
+        axes[0, 1].set_title('Learning Rate Schedule')
+        axes[0, 1].set_xlabel('Epoch')
+        axes[0, 1].set_ylabel('Learning Rate')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True)
+        axes[0, 1].set_yscale('log')
         
-        dice_metric = DiceScore()
-        iou_metric = IoUScore()
+        # 像素准确率曲线
+        train_pa = [m['pixel_accuracy'] for m in self.train_metrics.get_average_metrics()]
+        val_pa = [m['pixel_accuracy'] for m in self.val_metrics.get_average_metrics()]
+        axes[1, 0].plot(train_pa, label='Train PA', color='blue')
+        axes[1, 0].plot(val_pa, label='Val PA', color='red')
+        axes[1, 0].set_title('Pixel Accuracy')
+        axes[1, 0].set_xlabel('Epoch')
+        axes[1, 0].set_ylabel('Pixel Accuracy')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True)
         
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(tqdm(self.test_loader, desc='Testing')):
-                images = batch['image'].to(self.device)
-                masks = batch['mask'].to(self.device)
-                
-                # 前向传播
-                outputs = self.model(images)
-                predictions = torch.argmax(outputs, dim=1)
-                
-                # 计算指标
-                dice_score = dice_metric(predictions, masks)
-                iou_score = iou_metric(predictions, masks)
-                
-                test_dice += dice_score
-                test_iou += iou_score
-                
-                # 保存一些预测结果用于可视化
-                if batch_idx < 5:  # 只保存前5个批次
-                    save_predictions(
-                        images, masks, predictions,
-                        self.output_dir / f'test_predictions_batch_{batch_idx}.png'
-                    )
+        # IoU曲线
+        train_iou = [m['iou'] for m in self.train_metrics.get_average_metrics()]
+        val_iou = [m['iou'] for m in self.val_metrics.get_average_metrics()]
+        axes[1, 1].plot(train_iou, label='Train IoU', color='blue')
+        axes[1, 1].plot(val_iou, label='Val IoU', color='red')
+        axes[1, 1].set_title('Intersection over Union')
+        axes[1, 1].set_xlabel('Epoch')
+        axes[1, 1].set_ylabel('IoU')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True)
         
-        avg_dice = test_dice / num_batches
-        avg_iou = test_iou / num_batches
-        
-        logger.info(f"测试结果 - Dice: {avg_dice:.4f}, IoU: {avg_iou:.4f}")
-        
-        # 保存测试结果
-        test_results = {
-            'dice': avg_dice,
-            'iou': avg_iou,
-            'num_batches': num_batches
-        }
-        
-        with open(self.output_dir / 'test_results.json', 'w') as f:
-            json.dump(test_results, f, indent=2)
+        plt.tight_layout()
+        plt.savefig(os.path.join(RESULT_SAVE_PATH, 'training_curves.png'), dpi=300, bbox_inches='tight')
+        plt.show()
 
 
 def main():
     """主函数"""
-    # 配置
-    config = {
-        'data_dir': '/mnt/external_4tb/hjy/assignment1/data/ToothSegmDataset',
-        'output_dir': '/mnt/external_4tb/hjy/assignment1/results',
-        'num_classes': 2,  # 背景 + 牙齿
-        'image_size': 512,
-        'batch_size': 8,
-        'num_workers': 0,  # 暂时使用单进程避免多进程问题
-        'epochs': 100,
-        'learning_rate': 1e-4,
-        'weight_decay': 1e-5,
-        'patience': 10,
-        'early_stopping_patience': 20,
-        'tooth_types': None  # 使用所有牙齿类型
-    }
+    parser = argparse.ArgumentParser(description='牙齿分割模型训练')
+    parser.add_argument('--batch_size', type=int, default=TRAIN_CONFIG['batch_size'], help='批次大小')
+    parser.add_argument('--epochs', type=int, default=TRAIN_CONFIG['num_epochs'], help='训练轮数')
+    parser.add_argument('--lr', type=float, default=TRAIN_CONFIG['learning_rate'], help='学习率')
+    parser.add_argument('--tooth_ids', nargs='+', type=int, default=TRAIN_CONFIG['selected_tooth_ids'], 
+                       help='选择的牙齿ID列表')
+    parser.add_argument('--device', type=str, default='auto', help='设备 (cuda/cpu/auto)')
+    parser.add_argument('--resume', type=str, default=None, help='恢复训练的模型路径')
+    
+    args = parser.parse_args()
+    
+    # 设备选择
+    if args.device == 'auto':
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    else:
+        device = torch.device(args.device)
+    
+    print(f"使用设备: {device}")
+    
+    # 更新配置
+    config = TRAIN_CONFIG.copy()
+    config.update({
+        'batch_size': args.batch_size,
+        'num_epochs': args.epochs,
+        'learning_rate': args.lr,
+        'selected_tooth_ids': args.tooth_ids
+    })
+    
+    print(f"训练配置: {config}")
+    print(f"选择的牙齿ID: {args.tooth_ids}")
+    
+    # 创建数据加载器
+    print("创建数据加载器...")
+    train_loader, val_loader = create_data_loaders(
+        selected_tooth_ids=args.tooth_ids,
+        batch_size=config['batch_size'],
+        val_split=config['val_split']
+    )
+    
+    # 创建模型
+    print("创建模型...")
+    model = create_model(MODEL_CONFIG)
+    model = model.to(device)
     
     # 创建训练器
-    trainer = ToothSegmentationTrainer(config)
+    trainer = Trainer(model, train_loader, val_loader, device, config)
     
-    # 训练
+    # 恢复训练（如果指定）
+    if args.resume:
+        print(f"恢复训练: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        trainer.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        print(f"从第 {checkpoint['epoch']+1} 轮恢复训练")
+    
+    # 开始训练
     trainer.train()
-    
-    # 测试
-    trainer.test()
 
 
 if __name__ == "__main__":

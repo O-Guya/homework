@@ -1,315 +1,200 @@
 """
-分割任务评估指标
+评估指标计算
 """
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
-from typing import Optional
+import torch
+import torch.nn.functional as F
 
 
-class DiceLoss(nn.Module):
-    """Dice损失函数"""
-    
-    def __init__(self, smooth=1e-5):
-        super(DiceLoss, self).__init__()
-        self.smooth = smooth
-    
-    def forward(self, predictions, targets):
-        """
-        计算Dice损失
-        
-        Args:
-            predictions: 预测logits (B, C, H, W)
-            targets: 真实标签 (B, H, W)
-        
-        Returns:
-            Dice损失
-        """
-        # 将预测转换为概率
-        predictions = F.softmax(predictions, dim=1)
-        
-        # 获取前景类别（类别1）
-        pred_foreground = predictions[:, 1, :, :]  # (B, H, W)
-        target_foreground = (targets == 1).float()  # (B, H, W)
-        
-        # 计算Dice系数
-        intersection = (pred_foreground * target_foreground).sum(dim=(1, 2))
-        union = pred_foreground.sum(dim=(1, 2)) + target_foreground.sum(dim=(1, 2))
-        
-        dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
-        
-        # 返回1 - Dice作为损失
-        return 1 - dice.mean()
-
-
-class DiceScore:
-    """Dice分数计算器"""
-    
-    def __init__(self, smooth=1e-5):
-        self.smooth = smooth
-    
-    def __call__(self, predictions, targets):
-        """
-        计算Dice分数
-        
-        Args:
-            predictions: 预测标签 (B, H, W)
-            targets: 真实标签 (B, H, W)
-        
-        Returns:
-            Dice分数
-        """
-        # 转换为numpy
-        if isinstance(predictions, torch.Tensor):
-            predictions = predictions.cpu().numpy()
-        if isinstance(targets, torch.Tensor):
-            targets = targets.cpu().numpy()
-        
-        # 计算每个样本的Dice分数
-        dice_scores = []
-        for pred, target in zip(predictions, targets):
-            # 二值化
-            pred_binary = (pred == 1).astype(np.float32)
-            target_binary = (target == 1).astype(np.float32)
-            
-            # 计算Dice
-            intersection = np.sum(pred_binary * target_binary)
-            union = np.sum(pred_binary) + np.sum(target_binary)
-            
-            if union == 0:
-                dice = 1.0 if intersection == 0 else 0.0
-            else:
-                dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
-            
-            dice_scores.append(dice)
-        
-        return np.mean(dice_scores)
-
-
-class IoUScore:
-    """IoU分数计算器"""
-    
-    def __init__(self, smooth=1e-5):
-        self.smooth = smooth
-    
-    def __call__(self, predictions, targets):
-        """
-        计算IoU分数
-        
-        Args:
-            predictions: 预测标签 (B, H, W)
-            targets: 真实标签 (B, H, W)
-        
-        Returns:
-            IoU分数
-        """
-        # 转换为numpy
-        if isinstance(predictions, torch.Tensor):
-            predictions = predictions.cpu().numpy()
-        if isinstance(targets, torch.Tensor):
-            targets = targets.cpu().numpy()
-        
-        # 计算每个样本的IoU分数
-        iou_scores = []
-        for pred, target in zip(predictions, targets):
-            # 二值化
-            pred_binary = (pred == 1).astype(np.float32)
-            target_binary = (target == 1).astype(np.float32)
-            
-            # 计算IoU
-            intersection = np.sum(pred_binary * target_binary)
-            union = np.sum(pred_binary) + np.sum(target_binary) - intersection
-            
-            if union == 0:
-                iou = 1.0 if intersection == 0 else 0.0
-            else:
-                iou = (intersection + self.smooth) / (union + self.smooth)
-            
-            iou_scores.append(iou)
-        
-        return np.mean(iou_scores)
-
-
-class PixelAccuracy:
-    """像素准确率计算器"""
-    
-    def __call__(self, predictions, targets):
-        """
-        计算像素准确率
-        
-        Args:
-            predictions: 预测标签 (B, H, W)
-            targets: 真实标签 (B, H, W)
-        
-        Returns:
-            像素准确率
-        """
-        # 转换为numpy
-        if isinstance(predictions, torch.Tensor):
-            predictions = predictions.cpu().numpy()
-        if isinstance(targets, torch.Tensor):
-            targets = targets.cpu().numpy()
-        
-        # 计算准确率
-        correct = (predictions == targets).sum()
-        total = predictions.size
-        
-        return correct / total
-
-
-class PrecisionScore:
-    """精确率计算器"""
-    
-    def __call__(self, predictions, targets):
-        """
-        计算精确率
-        
-        Args:
-            predictions: 预测标签 (B, H, W)
-            targets: 真实标签 (B, H, W)
-        
-        Returns:
-            精确率
-        """
-        # 转换为numpy
-        if isinstance(predictions, torch.Tensor):
-            predictions = predictions.cpu().numpy()
-        if isinstance(targets, torch.Tensor):
-            targets = targets.cpu().numpy()
-        
-        # 二值化
-        pred_binary = (predictions == 1).astype(np.float32)
-        target_binary = (targets == 1).astype(np.float32)
-        
-        # 计算精确率
-        true_positive = np.sum(pred_binary * target_binary)
-        false_positive = np.sum(pred_binary * (1 - target_binary))
-        
-        if true_positive + false_positive == 0:
-            return 0.0
-        
-        return true_positive / (true_positive + false_positive)
-
-
-class RecallScore:
-    """召回率计算器"""
-    
-    def __call__(self, predictions, targets):
-        """
-        计算召回率
-        
-        Args:
-            predictions: 预测标签 (B, H, W)
-            targets: 真实标签 (B, H, W)
-        
-        Returns:
-            召回率
-        """
-        # 转换为numpy
-        if isinstance(predictions, torch.Tensor):
-            predictions = predictions.cpu().numpy()
-        if isinstance(targets, torch.Tensor):
-            targets = targets.cpu().numpy()
-        
-        # 二值化
-        pred_binary = (predictions == 1).astype(np.float32)
-        target_binary = (targets == 1).astype(np.float32)
-        
-        # 计算召回率
-        true_positive = np.sum(pred_binary * target_binary)
-        false_negative = np.sum((1 - pred_binary) * target_binary)
-        
-        if true_positive + false_negative == 0:
-            return 0.0
-        
-        return true_positive / (true_positive + false_negative)
-
-
-class F1Score:
-    """F1分数计算器"""
-    
-    def __call__(self, predictions, targets):
-        """
-        计算F1分数
-        
-        Args:
-            predictions: 预测标签 (B, H, W)
-            targets: 真实标签 (B, H, W)
-        
-        Returns:
-            F1分数
-        """
-        precision = PrecisionScore()(predictions, targets)
-        recall = RecallScore()(predictions, targets)
-        
-        if precision + recall == 0:
-            return 0.0
-        
-        return 2 * (precision * recall) / (precision + recall)
-
-
-def compute_all_metrics(predictions, targets):
+def pixel_accuracy(pred, target):
     """
-    计算所有指标
-    
+    计算像素准确率
     Args:
-        predictions: 预测标签 (B, H, W)
-        targets: 真实标签 (B, H, W)
-    
+        pred: 预测结果 (B, 1, H, W)
+        target: 真实标签 (B, 1, H, W)
     Returns:
-        包含所有指标的字典
+        accuracy: 像素准确率
+    """
+    pred = (pred > 0.5).float()
+    correct = (pred == target).float()
+    accuracy = correct.sum() / correct.numel()
+    return accuracy.item()
+
+
+def mean_pixel_accuracy(pred, target, num_classes=2):
+    """
+    计算平均像素准确率 (mPA)
+    Args:
+        pred: 预测结果 (B, 1, H, W)
+        target: 真实标签 (B, 1, H, W)
+        num_classes: 类别数量
+    Returns:
+        mpa: 平均像素准确率
+    """
+    pred = (pred > 0.5).long()
+    target = target.long()
+    
+    # 展平
+    pred_flat = pred.view(-1)
+    target_flat = target.view(-1)
+    
+    # 计算混淆矩阵
+    confusion_matrix = torch.zeros(num_classes, num_classes, dtype=torch.long)
+    for i in range(num_classes):
+        for j in range(num_classes):
+            confusion_matrix[i, j] = ((pred_flat == i) & (target_flat == j)).sum()
+    
+    # 计算每类的准确率
+    class_acc = confusion_matrix.diag() / confusion_matrix.sum(dim=1).float()
+    class_acc = class_acc[~torch.isnan(class_acc)]  # 移除NaN值
+    
+    mpa = class_acc.mean().item()
+    return mpa
+
+
+def intersection_over_union(pred, target, smooth=1e-6):
+    """
+    计算IoU
+    Args:
+        pred: 预测结果 (B, 1, H, W)
+        target: 真实标签 (B, 1, H, W)
+        smooth: 平滑因子
+    Returns:
+        iou: IoU值
+    """
+    pred = (pred > 0.5).float()
+    target = target.float()
+    
+    # 计算交集和并集
+    intersection = (pred * target).sum()
+    union = pred.sum() + target.sum() - intersection
+    
+    iou = (intersection + smooth) / (union + smooth)
+    return iou.item()
+
+
+def mean_intersection_over_union(pred, target, num_classes=2, smooth=1e-6):
+    """
+    计算平均IoU (mIoU)
+    Args:
+        pred: 预测结果 (B, 1, H, W)
+        target: 真实标签 (B, 1, H, W)
+        num_classes: 类别数量
+        smooth: 平滑因子
+    Returns:
+        miou: 平均IoU
+    """
+    pred = (pred > 0.5).long()
+    target = target.long()
+    
+    # 展平
+    pred_flat = pred.view(-1)
+    target_flat = target.view(-1)
+    
+    # 计算混淆矩阵
+    confusion_matrix = torch.zeros(num_classes, num_classes, dtype=torch.long)
+    for i in range(num_classes):
+        for j in range(num_classes):
+            confusion_matrix[i, j] = ((pred_flat == i) & (target_flat == j)).sum()
+    
+    # 计算每类的IoU
+    intersection = confusion_matrix.diag()
+    union = confusion_matrix.sum(dim=1) + confusion_matrix.sum(dim=0) - intersection
+    
+    iou = (intersection.float() + smooth) / (union.float() + smooth)
+    iou = iou[~torch.isnan(iou)]  # 移除NaN值
+    
+    miou = iou.mean().item()
+    return miou
+
+
+def dice_coefficient(pred, target, smooth=1e-6):
+    """
+    计算Dice系数
+    Args:
+        pred: 预测结果 (B, 1, H, W)
+        target: 真实标签 (B, 1, H, W)
+        smooth: 平滑因子
+    Returns:
+        dice: Dice系数
+    """
+    pred = (pred > 0.5).float()
+    target = target.float()
+    
+    intersection = (pred * target).sum()
+    dice = (2.0 * intersection + smooth) / (pred.sum() + target.sum() + smooth)
+    return dice.item()
+
+
+def calculate_metrics(pred, target):
+    """
+    计算所有评估指标
+    Args:
+        pred: 预测结果 (B, 1, H, W)
+        target: 真实标签 (B, 1, H, W)
+    Returns:
+        metrics: 包含所有指标的字典
     """
     metrics = {}
     
-    # 计算各种指标
-    metrics['dice'] = DiceScore()(predictions, targets)
-    metrics['iou'] = IoUScore()(predictions, targets)
-    metrics['pixel_accuracy'] = PixelAccuracy()(predictions, targets)
-    metrics['precision'] = PrecisionScore()(predictions, targets)
-    metrics['recall'] = RecallScore()(predictions, targets)
-    metrics['f1'] = F1Score()(predictions, targets)
+    # 像素准确率
+    metrics['pixel_accuracy'] = pixel_accuracy(pred, target)
+    
+    # 平均像素准确率
+    metrics['mean_pixel_accuracy'] = mean_pixel_accuracy(pred, target)
+    
+    # IoU
+    metrics['iou'] = intersection_over_union(pred, target)
+    
+    # 平均IoU
+    metrics['mean_iou'] = mean_intersection_over_union(pred, target)
+    
+    # Dice系数
+    metrics['dice'] = dice_coefficient(pred, target)
     
     return metrics
 
 
-if __name__ == "__main__":
-    # 测试指标
-    print("=== 测试分割指标 ===")
+class MetricsTracker:
+    """
+    指标跟踪器
+    """
+    def __init__(self):
+        self.reset()
     
-    # 创建测试数据
-    batch_size = 4
-    height, width = 256, 256
+    def reset(self):
+        """重置所有指标"""
+        self.pixel_accuracy = []
+        self.mean_pixel_accuracy = []
+        self.iou = []
+        self.mean_iou = []
+        self.dice = []
     
-    # 创建预测和真实标签
-    predictions = torch.randint(0, 2, (batch_size, height, width))
-    targets = torch.randint(0, 2, (batch_size, height, width))
+    def update(self, pred, target):
+        """更新指标"""
+        metrics = calculate_metrics(pred, target)
+        self.pixel_accuracy.append(metrics['pixel_accuracy'])
+        self.mean_pixel_accuracy.append(metrics['mean_pixel_accuracy'])
+        self.iou.append(metrics['iou'])
+        self.mean_iou.append(metrics['mean_iou'])
+        self.dice.append(metrics['dice'])
     
-    print(f"预测形状: {predictions.shape}")
-    print(f"真实标签形状: {targets.shape}")
+    def get_average_metrics(self):
+        """获取平均指标"""
+        return {
+            'pixel_accuracy': np.mean(self.pixel_accuracy),
+            'mean_pixel_accuracy': np.mean(self.mean_pixel_accuracy),
+            'iou': np.mean(self.iou),
+            'mean_iou': np.mean(self.mean_iou),
+            'dice': np.mean(self.dice)
+        }
     
-    # 测试各种指标
-    dice_score = DiceScore()(predictions, targets)
-    iou_score = IoUScore()(predictions, targets)
-    pixel_acc = PixelAccuracy()(predictions, targets)
-    precision = PrecisionScore()(predictions, targets)
-    recall = RecallScore()(predictions, targets)
-    f1 = F1Score()(predictions, targets)
-    
-    print(f"Dice分数: {dice_score:.4f}")
-    print(f"IoU分数: {iou_score:.4f}")
-    print(f"像素准确率: {pixel_acc:.4f}")
-    print(f"精确率: {precision:.4f}")
-    print(f"召回率: {recall:.4f}")
-    print(f"F1分数: {f1:.4f}")
-    
-    # 测试所有指标
-    all_metrics = compute_all_metrics(predictions, targets)
-    print(f"\n所有指标: {all_metrics}")
-    
-    # 测试Dice损失
-    predictions_logits = torch.randn(batch_size, 2, height, width)
-    dice_loss = DiceLoss()(predictions_logits, targets)
-    print(f"Dice损失: {dice_loss:.4f}")
-    
-    print("✅ 指标测试完成！")
+    def get_std_metrics(self):
+        """获取指标标准差"""
+        return {
+            'pixel_accuracy': np.std(self.pixel_accuracy),
+            'mean_pixel_accuracy': np.std(self.mean_pixel_accuracy),
+            'iou': np.std(self.iou),
+            'mean_iou': np.std(self.mean_iou),
+            'dice': np.std(self.dice)
+        }

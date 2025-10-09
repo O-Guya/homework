@@ -77,16 +77,12 @@ class OutConv(nn.Module):
 
 
 class FiLM(nn.Module):
-    """
-    Feature-wise Linear Modulation (FiLM) 层
-    用于将牙齿ID信息注入到特征中
-    """
+    """Feature-wise Linear Modulation (FiLM) 层"""
     def __init__(self, feature_dim, condition_dim):
         super().__init__()
         self.feature_dim = feature_dim
         self.condition_dim = condition_dim
         
-        # 生成缩放和偏移参数
         self.scale_net = nn.Sequential(
             nn.Linear(condition_dim, feature_dim),
             nn.ReLU(),
@@ -99,27 +95,10 @@ class FiLM(nn.Module):
         )
 
     def forward(self, x, condition):
-        """
-        Args:
-            x: 输入特征 (B, C, H, W)
-            condition: 条件向量 (B, condition_dim)
-        Returns:
-            modulated_x: 调制后的特征
-        """
         B, C, H, W = x.shape
-        
-        # 生成缩放和偏移参数
-        scale = self.scale_net(condition)  # (B, C)
-        shift = self.shift_net(condition)  # (B, C)
-        
-        # 扩展维度以匹配特征图
-        scale = scale.view(B, C, 1, 1)
-        shift = shift.view(B, C, 1, 1)
-        
-        # 应用FiLM调制
-        modulated_x = scale * x + shift
-        
-        return modulated_x
+        scale = self.scale_net(condition).view(B, C, 1, 1)
+        shift = self.shift_net(condition).view(B, C, 1, 1)
+        return scale * x + shift
 
 
 class ToothIDEmbedding(nn.Module):
@@ -134,27 +113,18 @@ class ToothIDEmbedding(nn.Module):
         )
 
     def forward(self, tooth_ids):
-        """
-        Args:
-            tooth_ids: 牙齿ID张量 (B,)
-        Returns:
-            embedded: 嵌入后的牙齿ID向量 (B, embedding_dim)
-        """
         embedded = self.embedding(tooth_ids)
         embedded = self.projection(embedded)
         return embedded
 
 
 class ConditionalUNet(nn.Module):
-    """
-    条件化U-Net模型
-    支持牙齿ID条件化输入
-    """
+    """条件化U-Net模型"""
     def __init__(self, 
                  input_channels=3, 
                  num_classes=1, 
                  base_filters=64, 
-                 num_tooth_ids=21,
+                 num_tooth_ids=31,
                  tooth_id_embedding_dim=32,
                  dropout_rate=0.1):
         super(ConditionalUNet, self).__init__()
@@ -162,8 +132,6 @@ class ConditionalUNet(nn.Module):
         self.input_channels = input_channels
         self.num_classes = num_classes
         self.base_filters = base_filters
-        self.num_tooth_ids = num_tooth_ids
-        self.tooth_id_embedding_dim = tooth_id_embedding_dim
         
         # 牙齿ID嵌入
         self.tooth_id_embedding = ToothIDEmbedding(num_tooth_ids, tooth_id_embedding_dim)
@@ -175,7 +143,7 @@ class ConditionalUNet(nn.Module):
         self.down3 = Down(base_filters * 4, base_filters * 8)
         self.down4 = Down(base_filters * 8, base_filters * 16)
         
-        # FiLM层用于条件化
+        # FiLM层
         self.film1 = FiLM(base_filters * 2, tooth_id_embedding_dim)
         self.film2 = FiLM(base_filters * 4, tooth_id_embedding_dim)
         self.film3 = FiLM(base_filters * 8, tooth_id_embedding_dim)
@@ -194,15 +162,8 @@ class ConditionalUNet(nn.Module):
         self.dropout = nn.Dropout2d(dropout_rate)
 
     def forward(self, x, tooth_ids):
-        """
-        Args:
-            x: 输入图像 (B, 3, H, W)
-            tooth_ids: 牙齿ID (B,)
-        Returns:
-            output: 分割结果 (B, 1, H, W)
-        """
         # 嵌入牙齿ID
-        tooth_embedding = self.tooth_id_embedding(tooth_ids)  # (B, embedding_dim)
+        tooth_embedding = self.tooth_id_embedding(tooth_ids)
         
         # 编码器
         x1 = self.inc(x)
@@ -231,44 +192,26 @@ class ConditionalUNet(nn.Module):
         return output
 
     def inference(self, input_image, tooth_id):
-        """
-        推理接口，符合prompt要求
-        Args:
-            input_image: 输入图像 (3, H, W) 或 (1, 3, H, W)
-            tooth_id: 目标牙齿ID (int)
-        Returns:
-            mask_image: 分割mask (1, H, W)
-        """
+        """推理接口"""
         self.eval()
         
         with torch.no_grad():
-            # 确保输入格式正确
             if input_image.dim() == 3:
-                input_image = input_image.unsqueeze(0)  # 添加batch维度
+                input_image = input_image.unsqueeze(0)
             
-            # 确保tooth_id是tensor
             if isinstance(tooth_id, int):
                 tooth_id = torch.tensor([tooth_id], dtype=torch.long, device=input_image.device)
             elif tooth_id.dim() == 0:
                 tooth_id = tooth_id.unsqueeze(0)
             
-            # 前向传播
             output = self.forward(input_image, tooth_id)
-            
-            # 应用sigmoid激活
             mask_image = torch.sigmoid(output)
             
         return mask_image
 
 
 def create_model(config=None):
-    """
-    创建模型实例
-    Args:
-        config: 模型配置字典
-    Returns:
-        model: 模型实例
-    """
+    """创建模型实例"""
     if config is None:
         config = MODEL_CONFIG
     
@@ -288,13 +231,12 @@ if __name__ == "__main__":
     # 测试模型
     model = create_model()
     
-    # 创建测试输入
     batch_size = 2
     input_image = torch.randn(batch_size, 3, 256, 256)
     tooth_ids = torch.tensor([0, 1])
     
-    # 前向传播
     output = model(input_image, tooth_ids)
     print(f"输入形状: {input_image.shape}")
     print(f"输出形状: {output.shape}")
     print(f"模型参数数量: {sum(p.numel() for p in model.parameters()):,}")
+

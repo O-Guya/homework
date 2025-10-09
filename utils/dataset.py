@@ -1,209 +1,271 @@
+"""
+牙齿分割数据集类
+"""
 import os
+import cv2
 import numpy as np
 import torch
-from torch.utils.data import Dataset
-from PIL import Image
-import torchvision.transforms as transforms
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+from config import TRAIN_DATA_PATH, TEST_DATA_PATH, TOOTH_ID_MAPPING, TRAIN_CONFIG, AUGMENTATION_CONFIG
+
+
+def read_mask(mask_path):
+    """
+    读取mask图像并分离不同区域
+    Args:
+        mask_path: mask图像路径
+    Returns:
+        mask_upper: 上牙龈mask (value 1 -> 255)
+        mask_lower: 下牙龈mask (value 2 -> 255) 
+        mask_tooth: 目标牙齿mask (value 3 -> 255)
+    """
+    mask_img = cv2.imread(mask_path, -1)
+    if mask_img is None:
+        raise ValueError(f"无法读取mask图像: {mask_path}")
+    
+    # 分离不同区域
+    mask_upper = np.where(mask_img == 1, 255, 0).astype(np.uint8)
+    mask_lower = np.where(mask_img == 2, 255, 0).astype(np.uint8)
+    mask_tooth = np.where(mask_img == 3, 255, 0).astype(np.uint8)
+    
+    return mask_upper, mask_lower, mask_tooth
+
 
 class ToothSegmentationDataset(Dataset):
     """
     牙齿分割数据集类
-    
-    这个类继承自PyTorch的Dataset，用于加载和处理牙齿分割数据
-    主要功能：
-    1. 加载RGB图像和对应的掩码
-    2. 应用数据变换（如resize、normalize等）
-    3. 支持训练和测试模式
     """
-    
-    def __init__(self, data_dir, mode='train', transform=None, mask_transform=None):
+    def __init__(self, data_path, tooth_ids, is_training=True, image_size=(256, 256)):
         """
-        初始化数据集
-        
         Args:
-            data_dir (str): 数据集根目录路径
-            mode (str): 数据集模式 ('train', 'val', 'test')
-            transform: RGB图像的变换
-            mask_transform: 掩码图像的变换
+            data_path: 数据路径
+            tooth_ids: 要使用的牙齿ID列表
+            is_training: 是否为训练模式
+            image_size: 图像尺寸
         """
-        self.data_dir = data_dir
-        self.mode = mode
-        self.transform = transform
-        self.mask_transform = mask_transform
+        self.data_path = data_path
+        self.tooth_ids = tooth_ids
+        self.is_training = is_training
+        self.image_size = image_size
         
-        # 存储所有样本的路径
-        self.samples = []
+        # 收集所有数据样本
+        self.samples = self._collect_samples()
         
-        # 根据模式加载数据
-        self._load_samples()
-    
-    def _load_samples(self):
-        """
-        加载所有样本的路径信息
-        这个函数会遍历数据集目录，找到所有的RGB图像文件
-        """
-        if self.mode == 'test':
-            # 测试集：只有RGB图像，没有掩码
-            test_dir = os.path.join(self.data_dir, 'testset')
-            for sample_id in sorted(os.listdir(test_dir)):
-                sample_path = os.path.join(test_dir, sample_id)
-                if os.path.isdir(sample_path):
-                    # 获取该样本的所有RGB图像
-                    rgb_files = [f for f in os.listdir(sample_path) if f.endswith('_rgb.jpg')]
-                    for rgb_file in sorted(rgb_files):
-                        rgb_path = os.path.join(sample_path, rgb_file)
-                        self.samples.append({
-                            'rgb_path': rgb_path,
-                            'mask_path': None,  # 测试集没有掩码
-                            'sample_id': sample_id,
-                            'image_id': rgb_file.replace('_rgb.jpg', '')
-                        })
+        # 数据增强
+        if is_training:
+            self.transform = A.Compose([
+                A.Resize(image_size[0], image_size[1], always_apply=True),  # 强制调整尺寸
+                A.HorizontalFlip(p=0.5),
+                A.VerticalFlip(p=0.5),
+                A.Rotate(limit=AUGMENTATION_CONFIG['rotation_range'], p=0.5),
+                A.RandomBrightnessContrast(
+                    brightness_limit=AUGMENTATION_CONFIG['brightness_range'],
+                    contrast_limit=AUGMENTATION_CONFIG['contrast_range'],
+                    p=0.5
+                ),
+                A.RandomScale(scale_limit=AUGMENTATION_CONFIG['scale_range'], p=0.5),
+                A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                ToTensorV2()
+            ])
         else:
-            # 训练集和验证集：有RGB图像和掩码
-            mode_dir = os.path.join(self.data_dir, 'trainset_valset')
+            self.transform = A.Compose([
+                A.Resize(image_size[0], image_size[1], always_apply=True),  # 强制调整尺寸
+                A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                ToTensorV2()
+            ])
+    
+    def _collect_samples(self):
+        """收集所有数据样本"""
+        samples = []
+        
+        for tooth_id in self.tooth_ids:
+            tooth_dir = os.path.join(self.data_path, str(tooth_id))
+            if not os.path.exists(tooth_dir):
+                print(f"警告: 牙齿ID {tooth_id} 的目录不存在: {tooth_dir}")
+                continue
+                
+            # 查找train目录
+            train_dir = os.path.join(tooth_dir, "train")
+            if not os.path.exists(train_dir):
+                print(f"警告: 牙齿ID {tooth_id} 的train目录不存在: {train_dir}")
+                continue
             
-            # 遍历所有类别
-            for class_id in sorted(os.listdir(mode_dir)):
-                class_path = os.path.join(mode_dir, class_id)
-                if not os.path.isdir(class_path):
-                    continue
-                    
-                # 根据模式选择子目录
-                subdir = 'train' if self.mode == 'train' else 'val'
-                subdir_path = os.path.join(class_path, subdir)
-                
-                if not os.path.exists(subdir_path):
+            # 遍历所有患者目录
+            for patient_dir in os.listdir(train_dir):
+                patient_path = os.path.join(train_dir, patient_dir)
+                if not os.path.isdir(patient_path):
                     continue
                 
-                # 遍历该类别下的所有样本
-                for sample_id in os.listdir(subdir_path):
-                    sample_path = os.path.join(subdir_path, sample_id)
-                    if not os.path.isdir(sample_path):
-                        continue
-                    
-                    # 获取该样本的所有RGB图像
-                    rgb_files = [f for f in os.listdir(sample_path) if f.endswith('_rgb.jpg')]
-                    for rgb_file in sorted(rgb_files):
-                        rgb_path = os.path.join(sample_path, rgb_file)
-                        mask_file = rgb_file.replace('_rgb.jpg', '_mask.jpg')
-                        mask_path = os.path.join(sample_path, mask_file)
+                # 查找RGB和mask图像对
+                for file in os.listdir(patient_path):
+                    if file.endswith('_rgb.jpg'):
+                        rgb_path = os.path.join(patient_path, file)
+                        mask_file = file.replace('_rgb.jpg', '_mask.jpg')
+                        mask_path = os.path.join(patient_path, mask_file)
                         
-                        # 确保掩码文件存在
                         if os.path.exists(mask_path):
-                            self.samples.append({
+                            samples.append({
                                 'rgb_path': rgb_path,
                                 'mask_path': mask_path,
-                                'sample_id': sample_id,
-                                'class_id': class_id,
-                                'image_id': rgb_file.replace('_rgb.jpg', '')
+                                'tooth_id': tooth_id,
+                                'patient_id': patient_dir,
+                                'image_id': file.replace('_rgb.jpg', '')
                             })
         
-        print(f"加载了 {len(self.samples)} 个{self.mode}样本")
+        print(f"收集到 {len(samples)} 个训练样本")
+        return samples
     
     def __len__(self):
-        """返回数据集大小"""
         return len(self.samples)
     
     def __getitem__(self, idx):
-        """
-        获取指定索引的数据样本
-        
-        Args:
-            idx (int): 样本索引
-            
-        Returns:
-            dict: 包含RGB图像、掩码（如果有）和元数据的字典
-        """
         sample = self.samples[idx]
         
-        # 加载RGB图像
-        rgb_image = self._load_image(sample['rgb_path'])
+        # 读取RGB图像
+        rgb_image = cv2.imread(sample['rgb_path'])
+        rgb_image = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2RGB)
         
-        # 加载掩码（如果有）
-        mask = None
-        if sample['mask_path'] is not None:
-            mask = self._load_mask(sample['mask_path'])
+        # 读取mask
+        mask_upper, mask_lower, mask_tooth = read_mask(sample['mask_path'])
         
-        # 应用变换
-        if self.transform:
-            rgb_image = self.transform(rgb_image)
+        # 创建目标牙齿的二进制mask
+        target_mask = mask_tooth
         
-        if self.mask_transform and mask is not None:
-            mask = self.mask_transform(mask)
+        # 应用数据增强
+        transformed = self.transform(image=rgb_image, mask=target_mask)
         
-        # 返回数据字典
-        result = {
-            'image': rgb_image,
-            'sample_id': sample['sample_id'],
+        rgb_tensor = transformed['image']
+        mask_tensor = transformed['mask'].float() / 255.0  # 归一化到[0,1]
+        mask_tensor = mask_tensor.unsqueeze(0)  # 添加通道维度
+        
+        # 牙齿ID转换为tensor
+        tooth_id_tensor = torch.tensor(sample['tooth_id'], dtype=torch.long)
+        
+        return {
+            'image': rgb_tensor,
+            'mask': mask_tensor,
+            'tooth_id': tooth_id_tensor,
+            'patient_id': sample['patient_id'],
             'image_id': sample['image_id']
         }
-        
-        if mask is not None:
-            result['mask'] = mask
-            result['class_id'] = sample['class_id']
-        
-        return result
-    
-    def _load_image(self, image_path):
-        """
-        加载RGB图像
-        
-        Args:
-            image_path (str): 图像文件路径
-            
-        Returns:
-            PIL.Image: RGB图像
-        """
-        try:
-            # 使用PIL加载图像，确保是RGB格式
-            image = Image.open(image_path).convert('RGB')
-            return image
-        except Exception as e:
-            print(f"加载图像失败 {image_path}: {e}")
-            # 返回一个空白图像作为fallback
-            return Image.new('RGB', (512, 512), (0, 0, 0))
-    
-    def _load_mask(self, mask_path):
-        """
-        加载掩码图像
-        
-        Args:
-            mask_path (str): 掩码文件路径
-            
-        Returns:
-            PIL.Image: 灰度掩码图像
-        """
-        try:
-            # 使用PIL加载掩码，确保是灰度格式
-            mask = Image.open(mask_path).convert('L')
-            return mask
-        except Exception as e:
-            print(f"加载掩码失败 {mask_path}: {e}")
-            # 返回一个空白掩码作为fallback
-            return Image.new('L', (512, 512), 0)
 
-# 测试函数
-def test_dataset():
-    """测试数据集类的基本功能"""
-    print("=== 测试数据集类 ===")
+
+class TestDataset(Dataset):
+    """
+    测试数据集类
+    """
+    def __init__(self, data_path, image_size=(256, 256)):
+        self.data_path = data_path
+        self.image_size = image_size
+        
+        # 收集测试样本
+        self.samples = self._collect_test_samples()
+        
+        # 测试时的变换
+        self.transform = A.Compose([
+            A.Resize(image_size[0], image_size[1]),
+            A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ToTensorV2()
+        ])
     
-    # 创建数据集实例
-    dataset = ToothSegmentationDataset(
-        data_dir='ToothSegmDataset',
-        mode='train'
+    def _collect_test_samples(self):
+        """收集测试样本"""
+        samples = []
+        
+        for patient_dir in os.listdir(self.data_path):
+            patient_path = os.path.join(self.data_path, patient_dir)
+            if not os.path.isdir(patient_path):
+                continue
+            
+            for file in os.listdir(patient_path):
+                if file.endswith('_rgb.jpg'):
+                    rgb_path = os.path.join(patient_path, file)
+                    samples.append({
+                        'rgb_path': rgb_path,
+                        'patient_id': patient_dir,
+                        'image_id': file.replace('_rgb.jpg', '')
+                    })
+        
+        print(f"收集到 {len(samples)} 个测试样本")
+        return samples
+    
+    def __len__(self):
+        return len(self.samples)
+    
+    def __getitem__(self, idx):
+        sample = self.samples[idx]
+        
+        # 读取RGB图像
+        rgb_image = cv2.imread(sample['rgb_path'])
+        rgb_image = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2RGB)
+        
+        # 应用变换
+        transformed = self.transform(image=rgb_image)
+        rgb_tensor = transformed['image']
+        
+        return {
+            'image': rgb_tensor,
+            'patient_id': sample['patient_id'],
+            'image_id': sample['image_id']
+        }
+
+
+def create_data_loaders(selected_tooth_ids, batch_size=8, val_split=0.1, num_workers=4):
+    """
+    创建训练和验证数据加载器
+    """
+    # 创建完整数据集
+    full_dataset = ToothSegmentationDataset(
+        data_path=TRAIN_DATA_PATH,
+        tooth_ids=selected_tooth_ids,
+        is_training=True
     )
     
-    print(f"数据集大小: {len(dataset)}")
+    # 计算训练和验证集大小
+    total_size = len(full_dataset)
+    val_size = int(total_size * val_split)
+    train_size = total_size - val_size
     
-    # 测试获取一个样本
-    if len(dataset) > 0:
-        sample = dataset[0]
-        print(f"样本键: {sample.keys()}")
-        print(f"图像类型: {type(sample['image'])}")
-        print(f"图像尺寸: {sample['image'].size}")
-        if 'mask' in sample:
-            print(f"掩码类型: {type(sample['mask'])}")
-            print(f"掩码尺寸: {sample['mask'].size}")
+    # 随机分割数据集
+    train_dataset, val_dataset = torch.utils.data.random_split(
+        full_dataset, [train_size, val_size]
+    )
+    
+    # 创建数据加载器
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,  # 设置为0避免多进程问题
+        pin_memory=False  # 在MPS上禁用pin_memory
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,  # 设置为0避免多进程问题
+        pin_memory=False  # 在MPS上禁用pin_memory
+    )
+    
+    return train_loader, val_loader
 
-if __name__ == "__main__":
-    test_dataset()
+
+def create_test_loader(batch_size=8, num_workers=4):
+    """
+    创建测试数据加载器
+    """
+    test_dataset = TestDataset(data_path=TEST_DATA_PATH)
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,  # 设置为0避免多进程问题
+        pin_memory=False  # 在MPS上禁用pin_memory
+    )
+    
+    return test_loader
